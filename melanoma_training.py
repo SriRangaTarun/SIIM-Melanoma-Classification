@@ -1,4 +1,8 @@
+# Use BF16 with PyTorch XLA
+
 !export XLA_USE_BF16=1
+
+# Import necessary libraries
 
 import os
 import gc
@@ -26,6 +30,8 @@ import torch_xla.distributed.xla_multiprocessing as xmp
 
 from efficientnet_pytorch import EfficientNet
 from albumentations import Normalize, VerticalFlip, HorizontalFlip, Compose
+
+# Define hyperparameters and paths
 
 W = 512
 H = 512
@@ -56,11 +62,16 @@ PATH_DICT = {}
 for folder_path in tqdm(IMG_PATHS):
     for img_path in os.listdir(folder_path):
         PATH_DICT[img_path] = folder_path + '/'
-        
+
+# Load data and set random seeds
+
 np.random.seed(42)
 torch.manual_seed(42)
+
 test_df = pd.read_csv(TEST_DATA_PATH)
 train_df = pd.read_csv(TRAIN_DATA_PATH)
+
+# Define PyTorch dataset to input data to EfficientNet-B7
 
 def to_tensor(data):
     return [FloatTensor(point) for point in data]
@@ -83,6 +94,8 @@ class SIIMDataset(Dataset):
         target = [self.df.target[i]] if self.targ else 0
         image = cv2.imread(PATH_DICT[image_id] + image_id)
         return to_tensor([self.transformation(image=image)['image'], target])
+    
+# Define an Efficient-B7 model to classify melanoma
       
 def GlobalAveragePooling(x):
     return x.mean(axis=-1).mean(axis=-1)
@@ -98,6 +111,8 @@ class CancerNet(nn.Module):
         x = x.view(-1, 3, H, W)
         x = self.efn.extract_features(x)
         return self.dense_output(self.avgpool(x))
+    
+# Define binary cross entropy and accuracy
       
 def bce(y_true, y_pred):
     return nn.BCEWithLogitsLoss()(y_pred, y_true)
@@ -106,10 +121,26 @@ def acc(y_true, y_pred):
     y_true = y_true.squeeze()
     y_pred = nn.Sigmoid()(y_pred).squeeze()
     return (y_true == torch.round(y_pred)).float().sum()/len(y_true)
-  
+
+# Define helper function for training logs
+
+def print_metric(data, batch, epoch, start, end, metric, typ):
+    t = typ, metric, "%s", data, "%s"
+    if typ == "Train": pre = "BATCH %s" + str(batch-1) + "%s  "
+    if typ == "Val": pre = "\nEPOCH %s" + str(epoch+1) + "%s  "
+    time = np.round(end - start, 1); time = "Time: %s{}%s s".format(time)
+    fonts = [(fg(211), attr('reset')), (fg(212), attr('reset')), (fg(213), attr('reset'))]
+    print(pre % fonts[0] + "{} {}: {}{}{}".format(*t) % fonts[1] + "  " + time % fonts[2])
+
+# Split data into training/validation sets (80/20)
+
 split = int(SPLIT*len(train_df))
 train_df, val_df = train_df.loc[:split], train_df.loc[split:]
 train_df, val_df = train_df.reset_index(drop=True), val_df.reset_index(drop=True)
+
+# Define PyTorch dataloaders, model, and optimizer
+
+# Define sampling weights
 
 C = np.array([B, (1 - B)])*2
 ones = len(train_df.query('target == 1'))
@@ -118,12 +149,16 @@ zeros = len(train_df.query('target == 0'))
 weightage_fn = {0: C[1]/zeros, 1: C[0]/ones}
 weights = [weightage_fn[target] for target in train_df.target]
 
+# Define PyTorch datasets
+
 length = len(train_df)
 val_ids = val_df.image_name.apply(lambda x: x + '.jpg')
 train_ids = train_df.image_name.apply(lambda x: x + '.jpg')
 
 val_set = SIIMDataset(val_df, False, True, val_ids)
 train_set = SIIMDataset(train_df, True, True, train_ids)
+
+# Define sampling procedure and DataLoader
 
 train_sampler = WeightedRandomSampler(weights, length)
 if_sample, if_shuffle = (train_sampler, False), (None, True)
@@ -133,10 +168,14 @@ sampler, shuffler = sample_fn(SAMPLE, train_sampler)
 val_loader = DataLoader(val_set, VAL_BATCH_SIZE, shuffle=False)
 train_loader = DataLoader(train_set, BATCH_SIZE, sampler=sampler, shuffle=shuffler)
 
+# Define model and optimizer
+
 device = xm.xla_device()
 network = CancerNet(features=2560).to(device)
 optimizer = Adam([{'params': network.efn.parameters(), 'lr': LR[0]},
                   {'params': network.dense_output.parameters(), 'lr': LR[1]}])
+
+# Train the model on one TPU core
 
 print("STARTING TRAINING ...\n")
 
